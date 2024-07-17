@@ -1,0 +1,309 @@
+---
+title: "MEIN40330 :Assignment 1"
+author : "Sallyza Muhammad"
+output: html_document
+date: "2024-06-10"
+---
+
+```{r, message=FALSE}
+
+setwd("~/Desktop/MSC AI for Medicine and Medical Research/SEM3/AI Personalised Medicine/ASSIGNMENT")
+library(dplyr)
+library(tidyr)
+library(pheatmap)
+library(stats)
+library(dendextend)
+library(survival)
+library(survminer)
+library(data.table)
+library(glmnet)
+library(caTools)
+library(ggplot2)
+library(GenVisR)
+library(tidyverse)
+library(stringr) 
+```
+
+# FILE DOWNLOAD
+## Load Clinical Data
+
+```{r}
+# FILE DOWNLOAD
+## LOAD CLINICAL DATA
+#packageurl <- "https://cran.r-project.org/src/contrib/Archive/Matrix/Matrix_1.6-5.tar.gz"
+data_folder = "sarc_tcga_pan_can_atlas_2018"
+clin_raw <- read.delim(paste(data_folder, "data_clinical_patient.txt", sep = "/"), skip = 4)
+rownames(clin_raw) <- clin_raw$PATIENT_ID
+```
+
+## Load RNA Data
+```{r, echo=T, results='hide',fig.show = "hide"}
+## LOAD RNA DATA
+RNA_raw <- read.delim("~/Downloads/sarc_tcga_pan_can_atlas_2018/data_mrna_seq_v2_rsem_zscores_ref_all_samples.txt",check.names = FALSE)
+RNA_raw[is.na(RNA_raw)] <- 0
+RNA_raw <- RNA_raw[RNA_raw$Hugo_Symbol!='',]
+RNA_raw <- RNA_raw[!duplicated(RNA_raw$Hugo_Symbol),]
+rownames(RNA_raw) <- RNA_raw$Hugo_Symbol
+RNA <- as.data.frame(t(RNA_raw[-1:-2]))
+RNANUM <- as.data.frame(lapply(RNA, as.numeric))
+```
+
+# CLUSTERING
+## Dimensionality Reduction using PCA
+```{r, echo=T, results='hide',fig.show = "hide"}
+# Remove columns with zero variance
+RNA_no_zero_var <- RNANUM[, apply(RNANUM, 2, var) != 0]
+# Remove rows with any missing values (optional: you could also impute missing values)
+RNA_no_na <- RNA_no_zero_var[complete.cases(RNA_no_zero_var), ]
+# Perform PCA on the filtered data
+pca_result <- prcomp(RNA_no_na, scale. = TRUE)
+
+# Plot the first two principal components
+library(ggplot2)
+pca_data <- as.data.frame(pca_result$x)
+ggplot(pca_data, aes(x = PC1, y = PC2)) +
+  geom_point() +
+  labs(title = "PCA of RNA Data",
+       x = "Principal Component 1",
+       y = "Principal Component 2")
+```
+
+#Clustering using K-Means
+
+```{r, echo=T, results='hide',fig.show = "hide"}
+#Elbow method for determining the optimal number of clusters
+wss <- (nrow(pca_data)-1)*sum(apply(pca_data,2,var))
+for (i in 1:15) wss[i] <- sum(kmeans(pca_data, centers=i)$tot.withinss)
+
+# Plot the elbow graph
+plot(1:15, wss, type="b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+
+```
+
+# Survival Analysis
+## Combined Data
+```{r, echo=T, results='hide',fig.show = "hide"}
+clin <- clin_raw[str_sub(row.names(RNA), end = -4),]
+
+```
+
+## Survival Plot
+```{r, echo=T, results='hide',fig.show = "hide"}
+## Create a survival object consisting of times & censoring
+surv_obj <- Surv(time = clin$OS_MONTHS, 
+                 event = clin$OS_STATUS=="1:DECEASED")
+
+# 1 mean no predictor, just based on baseline hazard function
+fit <- survfit(surv_obj ~ 1, data = clin)
+ggsurvplot(fit, data = clin, xlab = "Month", ylab = "Overall survival")
+```
+
+## Cox Proportional Hazard on GENE
+```{r, echo=T, results='hide',fig.show = "hide"}
+## fit multivariate model (COX proportional hazard) 
+fit.coxph <- coxph(surv_obj ~ TP53 + MDM2 + CDK4 + CDKN2A + CDKN2B + RB1 + KIT + TERT + PTEN + PIK3CA, 
+                   data = RNA)
+ggforest(fit.coxph, data = RNA)
+```
+
+## Cox Proportional Hazard on PATHWAY
+```{r, echo=T, results='hide',fig.show = "hide"}
+library(progeny)
+zscores = as.matrix(t(RNA))
+pathways <- progeny(zscores, scale=TRUE, organism="Human")  #, top = 100, perm = 1)
+path_df = as.data.frame(pathways)
+#print(colnames(path_df))
+# fit multivariate model (COX proportional hazard) 
+fit.coxph <- coxph(surv_obj ~ Androgen + EGFR + Estrogen + Hypoxia + `JAK-STAT` + MAPK + NFkB + p53 + TGFb + PI3K +TNFa + Trail + VEGF + WNT, 
+                   data = path_df)
+ggforest(fit.coxph, data = path_df)
+
+```
+
+## PATHWAY CORRELATION 
+```{r, echo=T, results='hide',fig.show = "hide"}
+library(corrplot)
+corrplot(cor(path_df), type = "upper", order = "hclust",tl.col = "black", tl.srt = 45)
+
+```
+
+## Analysing gene NFkB depending on the pathway
+```{r, echo=T, results='hide',fig.show = "hide"}
+#with protein and gene correlated to the pathway
+# analysing on what NFkB activity depend
+NFkB_df = cbind(NFkB = path_df$NFkB, Trail = path_df$Trail,
+                TP53 = RNA$TP53, MDM2 = RNA$MDM2, CDKN2A = RNA$CDKN2A, 
+                CDKN2B = RNA$CDKN2B, CDK4 = RNA$CDK4, RB1 = RNA$RB1,  KIT= RNA$KIT,
+                TERT = RNA$TERT, PTEN = RNA$PTEN, PIK3CA = RNA$PIK3CA)
+corrplot(cor(NFkB_df), type = "upper", order = "hclust",tl.col = "black", tl.srt = 45)
+
+
+```
+
+## Creating object witout Zero times
+```{r, echo=T, results='hide',fig.show = "hide"}
+#before do GLM need to filter all 0
+# now creating object without zero times
+clin_filt <- clin[clin$OS_MONTHS > 0,]
+RNA_filt <- RNA[clin$OS_MONTHS > 0,]
+path_filt <- path_df[clin$OS_MONTHS > 0,]
+# create a survival object consisting of times & censoring
+surv_filt <- Surv(time = clin_filt$OS_MONTHS, 
+                  event = clin_filt$OS_STATUS=="1:DECEASED")
+fit <- survfit(surv_filt ~ 1, data = clin_filt)
+ggsurvplot(fit, data = clin_filt, xlab = "Month", ylab = "Overall survival")
+
+
+```
+
+## Apply GLM
+```{r, echo=T, results='hide',fig.show = "hide"}
+library("glmpath")
+library("glmnet")
+library("penalized")
+fit_glm <- glmnet(RNA_filt,surv_filt,family="cox") #, alpha = 1, standardize = TRUE, maxit = 1000
+plot(fit_glm)
+
+
+```
+
+```{r, echo=T, results='hide',fig.show = "hide"}
+#find best lambda
+cv_filt <- cv.glmnet(as.matrix(RNA_filt), surv_filt, family = "cox", alpha = 1)
+plot(cv_filt)
+
+```
+
+```{r, echo=T, results='hide',fig.show = "hide"}
+##Predict best lambda
+best_lambda <- cv_filt$lambda.min
+print(paste("best_lambda: ", cv_filt$lambda.min))
+```
+
+```{r, echo=T, results='hide',fig.show = "hide"}
+cfs = coef(fit_glm,s=0.13) 
+meaning_coefs = rownames(cfs)[cfs[,1]!= 0]
+meaning_vals = cfs[cfs[,1]!=0,]
+write.csv(meaning_vals,file='survival_coeffs_glmnet.csv')
+print(paste(meaning_coefs,collapse=" + ")) #print gene with 0 coefficient
+
+```
+
+```{r, echo=T, results='hide',fig.show = "hide"}
+# cutting to find most important lambda
+ncut = 15 
+vals_surv = sort(abs(meaning_vals),decreasing = TRUE)[1:ncut]
+print(paste(names(vals_surv),collapse=" + "))
+
+```
+
+## Plot COX Proportional Hazard
+```{r, echo=T, results='hide',fig.show = "hide"}
+fit.coxph <- coxph(surv_filt ~ TARDBP + B3GALT4 + ALDH1A1 + TRIM21 + DHRS12 + SRPK1 + TICAM1 + GALK2 + LRRC1 + AFTPH + GALNT12 + CPA3 + CCNDBP1 + BLMH + RGS20, data = RNA_filt)
+ggforest(fit.coxph, data = RNA_filt)
+
+```
+
+# PATHWAY Survival Analysis
+```{r, echo=T, results='hide',fig.show = "hide"}
+fit_glmp <- glmnet(path_filt,surv_filt,family="cox") # , alpha = 1, standardize = TRUE, maxit = 1000
+plot(fit_glmp)
+
+
+```
+
+```{r, echo=T, results='hide',fig.show = "hide"}
+cv_filtp <- cv.glmnet(as.matrix(path_filt), surv_filt, family = "cox", alpha = 1)
+plot(cv_filtp)
+```
+
+```{r, echo=T, results='hide',fig.show = "hide"}
+best_lambda <- cv_filtp$lambda.min
+print(paste("best_lambda: ", cv_filtp$lambda.min))
+```
+
+```{r, echo=T, results='hide',fig.show = "hide"}
+# Analysing results
+cfs = coef(fit_glm,s=0.14)
+meaning_coefs = rownames(cfs)[cfs[,1]!= 0]
+meaning_vals = cfs[cfs[,1]!=0,]
+write.csv(meaning_vals,file='survival_coeffs_progeny_glmnet.csv')#write higher coefficient
+print(paste(meaning_coefs,collapse=" + "))
+
+```
+
+```{r, echo=T, results='hide',fig.show = "hide"}
+ncut = 10
+vals_surv = sort(abs(meaning_vals),decreasing = TRUE)[1:ncut]
+print(paste(names(vals_surv),collapse=" + "))
+```
+
+```{r, echo=T, results='hide',fig.show = "hide"}
+fit.coxph <- coxph(surv_filt ~ TARDBP + B3GALT4 + ALDH1A1 + TRIM21 + DHRS12 + SRPK1 + CCNDBP1 + TICAM1 + LRRC1 + GALK2, data = RNA_filt)
+ggforest(fit.coxph, data = RNA_filt)
+
+```
+
+## Differentiate high and value group based on MAPK gene.
+```{r, echo=T, results='hide',fig.show = "hide"}
+# differentiate high and lower group,
+# find optimal value
+# plotting Kaplan-Mayer curves MAPK and PI3K
+pathway = 'MAPK'
+pathway_data = path_filt$MAPK
+# sort age 
+uni_path = sort(unique(pathway_data))
+# store results
+results_path = matrix(1,length(uni_path))
+# do a for loop for every unique value of age mat
+for (i in 2:(length(uni_path)-1)){ # Starting from 2 because the first element would yield no elements higher than.
+  path_i = 1*(pathway_data>uni_path[i])
+  # survdiff is the function from the survival package 
+  logrank = survdiff(surv_filt ~ path_i)
+  # store in results_age
+  results_path[i] = logrank$pvalue
+}
+```
+
+```{r, echo=T, results='hide',fig.show = "hide"}
+# Plot unique elements of age against p-value
+plot(uni_path, results_path, log = 'y')
+```
+
+```{r, echo=T, results='hide',fig.show = "hide"}
+# Select minimum P-value
+min_p_path = which.min(results_path)
+# here are 2 good thresholds, -1 and 1, 2 local minimum, 3 stratification
+opt_thr = uni_path[min_p_path]
+#opt_JAK = opt_thr
+#opt_thr = 0.0
+# Sanity check
+pval = survdiff(surv_filt ~ pathway_data>opt_thr)$pvalue
+nplus = sum(pathway_data>opt_thr)# how many patients we have in high group
+print(nplus)
+nminus = sum(pathway_data<opt_thr)   # how many patients we have in low group
+print(nminus)
+```
+
+## Kaplan Mier Model
+```{r, echo=T, results='hide',fig.show = "hide"}
+path_filt <- path_filt %>% mutate(MAPK_group = ifelse(MAPK >= 1, "high", ifelse(MAPK < 1.001*opt_thr,"low","intermediate")))
+nhigh = sum(pathway_data>1)
+ninter = sum((pathway_data<1) & (pathway_data > 1.001*opt_thr))
+nlow = sum(pathway_data<1.001*opt_thr)
+
+```
+
+## Plotting Kaplan Mier
+```{r, echo=T, results='hide',fig.show = "hide"}
+KM = survfit(surv_filt ~ MAPK_group,data = path_filt)
+# Plot Kaplan Meier 
+plot(KM, lwd = 3, col = c(1,2), cex.axis = 1.5, xlab = 'Months', ylab = 'Survival Probability' , cex.lab = 1.5)
+ggsurvplot(KM, data = path_filt,pval = TRUE,xlab = 'Overall survival time, months',
+        legend.labs=c(paste('Low ',pathway,' activity, ',nminus,' patient(s)',sep = ''),paste('High ',pathway,' activity, ',nplus,' patient(s)',sep = '')),
+         palette = c('blue','red'),legend.title="")
+
+```
+
